@@ -1,0 +1,6 @@
+# Bundle patch: auto-registers this plugin when installed via
+# `dsh plugin --profile web add dsh-guard-sensitive-paths` (or via a profile
+# package.json link: dependency plus this bundle layer).
+- insert:
+    - id: sensitive-paths
+      name: dsh-guard-sensitive-paths
