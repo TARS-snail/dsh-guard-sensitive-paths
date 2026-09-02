@@ -2,12 +2,13 @@
  * Sensitive-path approval guard: a prepended `tools/pre-execute` policy that
  * turns a write/edit/editor call whose path names a protected location — and a
  * `bash` command that mentions one — into an approval `ask` instead of
- * letting it run. The protected set is the shared sensitive-path definition
- * (`.env*`, `.git/`, SSH private keys, `*.pem`, `.ssh/`); the
- * search-layer exclusion in `@deepseek-ai/dsh-tool-fs-search` keeps the same
- * paths out of `glob`/`grep` results independently of this plugin's
- * configuration. Enabled by default; `sensitivePaths: false` makes the guard
- * a true no-op.
+ * letting it run. Reads are gated only for key material (SSH private keys and
+ * `.pem` certificates), which must never enter model context without
+ * approval; reading `.env`/`.git` stays allowed because loading environment
+ * files into tools is routine, and the search-layer exclusion in
+ * `@deepseek-ai/dsh-tool-fs-search` keeps those paths out of `glob`/`grep`
+ * results regardless of this plugin's configuration. Enabled by default;
+ * `sensitivePaths: false` makes the guard a true no-op.
  *
  * @module @deepseek-ai/dsh-guard-sensitive-paths
  */
@@ -32,12 +33,23 @@ export interface Config {
 }
 export declare const Config: z<Config>;
 /**
+ * Whether one path names key material: a basename equal to an SSH private
+ * key (`id_rsa`, `id_ed25519`, with an optional dotted suffix) or a basename
+ * ending in `.pem`. This is the narrower set read calls are gated on: reading
+ * `.env`/`.git` stays allowed (loading environment files into tools is
+ * routine), while key material must never enter model context without
+ * approval. Backslashes are normalized to `/` first.
+ *
+ * @param path - the candidate path, in whatever form the tool received it.
+ * @returns `true` when the path names key material.
+ */
+export declare function isKeyMaterialPath(path: string): boolean;
+/**
  * Whether one path names a protected sensitive location. Backslashes are
  * normalized to `/` first; absolute and relative forms are tested as given.
  * A match is: a path segment equal to or starting with `.env` (`.env`,
- * `.env.local`), a segment equal to `.git`, a segment equal to `.ssh`, a
- * basename equal to an SSH private-key name (`id_rsa`, `id_ed25519`, with
- * an optional dotted suffix), or a basename ending in `.pem`.
+ * `.env.local`), a segment equal to `.git`, a segment equal to `.ssh`, or a
+ * basename naming key material (SSH private key or `.pem` certificate).
  *
  * @param path - the candidate path, in whatever form the tool received it.
  * @returns `true` when the path names a sensitive location.
@@ -46,8 +58,9 @@ export declare function isSensitivePath(path: string): boolean;
 /**
  * Register the pre-execute approval guard, PREPENDED so it runs before any
  * other `tools/pre-execute` listener (including permission grants). A call
- * that targets a sensitive path returns an approval `ask` with the reason
- * instead of delegating; `sensitivePaths: false` registers nothing.
+ * that targets a sensitive path (or reads key material) returns an approval
+ * `ask` with the reason instead of delegating; `sensitivePaths: false`
+ * registers nothing.
  *
  * @param ctx - plugin context; the listener is an effect scoped to it.
  * @param config - resolved plugin configuration from schemastery.

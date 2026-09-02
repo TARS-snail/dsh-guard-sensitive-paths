@@ -2,12 +2,13 @@
  * Sensitive-path approval guard: a prepended `tools/pre-execute` policy that
  * turns a write/edit/editor call whose path names a protected location — and a
  * `bash` command that mentions one — into an approval `ask` instead of
- * letting it run. The protected set is the shared sensitive-path definition
- * (`.env*`, `.git/`, SSH private keys, `*.pem`, `.ssh/`); the
- * search-layer exclusion in `@deepseek-ai/dsh-tool-fs-search` keeps the same
- * paths out of `glob`/`grep` results independently of this plugin's
- * configuration. Enabled by default; `sensitivePaths: false` makes the guard
- * a true no-op.
+ * letting it run. Reads are gated only for key material (SSH private keys and
+ * `.pem` certificates), which must never enter model context without
+ * approval; reading `.env`/`.git` stays allowed because loading environment
+ * files into tools is routine, and the search-layer exclusion in
+ * `@deepseek-ai/dsh-tool-fs-search` keeps those paths out of `glob`/`grep`
+ * results regardless of this plugin's configuration. Enabled by default;
+ * `sensitivePaths: false` makes the guard a true no-op.
  *
  * @module @deepseek-ai/dsh-guard-sensitive-paths
  */
@@ -55,13 +56,35 @@ export const Config: z<Config> = z.object({
  */
 const SENSITIVE_COMMAND_SCAN = /(\.env\b|\.git[/\\]|id_rsa|id_ed25519|\b\S*\.pem\b|~?\/?\.ssh[/\\])/
 
+/** Whether a basename names key material: an SSH private key (with an optional dotted suffix) or a `.pem` certificate. */
+function isKeyMaterialBasename(basename: string): boolean {
+  return /^id_(rsa|ed25519)(\..*)?$/.test(basename) || basename.endsWith('.pem')
+}
+
+/**
+ * Whether one path names key material: a basename equal to an SSH private
+ * key (`id_rsa`, `id_ed25519`, with an optional dotted suffix) or a basename
+ * ending in `.pem`. This is the narrower set read calls are gated on: reading
+ * `.env`/`.git` stays allowed (loading environment files into tools is
+ * routine), while key material must never enter model context without
+ * approval. Backslashes are normalized to `/` first.
+ *
+ * @param path - the candidate path, in whatever form the tool received it.
+ * @returns `true` when the path names key material.
+ */
+export function isKeyMaterialPath(path: string): boolean {
+  const normalized = path.replaceAll('\\', '/')
+  const segments = normalized.split('/').filter(segment => segment.length > 0)
+  if (segments.length === 0) return false
+  return isKeyMaterialBasename(segments[segments.length - 1] as string)
+}
+
 /**
  * Whether one path names a protected sensitive location. Backslashes are
  * normalized to `/` first; absolute and relative forms are tested as given.
  * A match is: a path segment equal to or starting with `.env` (`.env`,
- * `.env.local`), a segment equal to `.git`, a segment equal to `.ssh`, a
- * basename equal to an SSH private-key name (`id_rsa`, `id_ed25519`, with
- * an optional dotted suffix), or a basename ending in `.pem`.
+ * `.env.local`), a segment equal to `.git`, a segment equal to `.ssh`, or a
+ * basename naming key material (SSH private key or `.pem` certificate).
  *
  * @param path - the candidate path, in whatever form the tool received it.
  * @returns `true` when the path names a sensitive location.
@@ -74,15 +97,16 @@ export function isSensitivePath(path: string): boolean {
   for (const segment of segments) {
     if (segment === '.git' || segment === '.ssh' || segment.startsWith('.env')) return true
   }
-  const basename = segments[segments.length - 1] as string
-  return /^id_(rsa|ed25519)(\..*)?$/.test(basename) || basename.endsWith('.pem')
+  return isKeyMaterialBasename(segments[segments.length - 1] as string)
 }
 /* jscpd:ignore-end */
 
 /**
  * The sensitive target one call names: the path argument for `write`/`edit`
- * (`file_path`) and `str_replace_editor` (`path`), or the matched command
- * fragment for `bash`. Every other tool names no target and passes through.
+ * (`file_path`) and `str_replace_editor` (`path`) gated on the full sensitive
+ * set, the `read` `file_path` gated on key material only, or the matched
+ * command fragment for `bash`. Every other tool names no target and passes
+ * through.
  */
 function sensitiveTarget(exec: ToolExecution): string | undefined {
   if (exec.name === 'write' || exec.name === 'edit' || exec.name === 'str_replace_editor') {
@@ -92,6 +116,13 @@ function sensitiveTarget(exec: ToolExecution): string | undefined {
       ? (args as Record<string, unknown>)[field]
       : undefined
     return typeof candidate === 'string' && isSensitivePath(candidate) ? candidate : undefined
+  }
+  if (exec.name === 'read') {
+    const args = exec.arguments
+    const candidate = typeof args === 'object' && args !== null
+      ? (args as Record<string, unknown>).file_path
+      : undefined
+    return typeof candidate === 'string' && isKeyMaterialPath(candidate) ? candidate : undefined
   }
   if (exec.name === 'bash') {
     const args = exec.arguments
@@ -107,8 +138,9 @@ function sensitiveTarget(exec: ToolExecution): string | undefined {
 /**
  * Register the pre-execute approval guard, PREPENDED so it runs before any
  * other `tools/pre-execute` listener (including permission grants). A call
- * that targets a sensitive path returns an approval `ask` with the reason
- * instead of delegating; `sensitivePaths: false` registers nothing.
+ * that targets a sensitive path (or reads key material) returns an approval
+ * `ask` with the reason instead of delegating; `sensitivePaths: false`
+ * registers nothing.
  *
  * @param ctx - plugin context; the listener is an effect scoped to it.
  * @param config - resolved plugin configuration from schemastery.

@@ -14,7 +14,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture, type ParameterSchemaSpec, type PreToolDecision, type ToolExecution } from '@deepseek-ai/dsh-tools'
 import * as sensitivePaths from '../src/index.ts'
-import { SENSITIVE_PATH_GLOBS, isSensitivePath } from '../src/index.ts'
+import { SENSITIVE_PATH_GLOBS, isKeyMaterialPath, isSensitivePath } from '../src/index.ts'
 
 const testToolSignal = new AbortController().signal
 
@@ -195,6 +195,32 @@ describe('isSensitivePath', () => {
   })
 })
 
+describe('isKeyMaterialPath', () => {
+  it.each([
+    ['~/.ssh/id_rsa'],
+    ['id_ed25519.pub'],
+    ['keys/id_ed25519'],
+    ['certs/server.pem'],
+    ['keys\\id_rsa'],
+  ])('matches key material: %s', (path) => {
+    expect(isKeyMaterialPath(path)).toBe(true)
+  })
+
+  it.each([
+    ['.env'],
+    ['.env.local'],
+    ['.ssh/config'],
+    ['.git/config'],
+    ['id_rsa_backup'],
+    ['my_id_rsa'],
+    ['src/index.ts'],
+    ['pemfile'],
+    ['x.pemx'],
+  ])('rejects a non-key-material path: %s', (path) => {
+    expect(isKeyMaterialPath(path)).toBe(false)
+  })
+})
+
 describe('pre-execute decisions (direct waterfall drive)', () => {
   it('asks for a write targeting .env', async () => {
     const { ctx } = await setup()
@@ -220,6 +246,27 @@ describe('pre-execute decisions (direct waterfall drive)', () => {
     })
   })
 
+  it('asks for a read of an SSH private key', async () => {
+    const { ctx } = await setup()
+    await expect(preDecision(ctx, fakeExec('read', { file_path: '~/.ssh/id_rsa' }))).resolves.toEqual({
+      kind: 'ask',
+      reason: 'read targets the sensitive path ~/.ssh/id_rsa; approval is required because it matches the sensitive-path policy',
+    })
+  })
+
+  it('asks for a read of a .pem certificate', async () => {
+    const { ctx } = await setup()
+    await expect(preDecision(ctx, fakeExec('read', { file_path: 'certs/server.pem' }))).resolves.toMatchObject({ kind: 'ask' })
+  })
+
+  it('passes a read of .env, .git, .ssh/config, or an ordinary file through', async () => {
+    const { ctx } = await setup()
+    await expect(preDecision(ctx, fakeExec('read', { file_path: '.env' }))).resolves.toEqual({ kind: 'allow' })
+    await expect(preDecision(ctx, fakeExec('read', { file_path: '.git/config' }))).resolves.toEqual({ kind: 'allow' })
+    await expect(preDecision(ctx, fakeExec('read', { file_path: '.ssh/config' }))).resolves.toEqual({ kind: 'allow' })
+    await expect(preDecision(ctx, fakeExec('read', { file_path: 'src/index.ts' }))).resolves.toEqual({ kind: 'allow' })
+  })
+
   it('asks for a bash command mentioning a sensitive path', async () => {
     const { ctx } = await setup()
     await expect(preDecision(ctx, fakeExec('bash', { command: 'cat ~/.ssh/id_rsa' }))).resolves.toEqual({
@@ -239,7 +286,7 @@ describe('pre-execute decisions (direct waterfall drive)', () => {
     await expect(preDecision(ctx, fakeExec('write', { file_path: 'src/index.ts' }))).resolves.toEqual({ kind: 'allow' })
   })
 
-  it('passes read, grep, and other tools through untouched', async () => {
+  it('passes a read of a non-key file, grep, and web_fetch through untouched', async () => {
     const { ctx } = await setup()
     await expect(preDecision(ctx, fakeExec('read', { file_path: '.env' }))).resolves.toEqual({ kind: 'allow' })
     await expect(preDecision(ctx, fakeExec('grep', { pattern: 'TOKEN' }))).resolves.toEqual({ kind: 'allow' })
@@ -283,6 +330,13 @@ describe('pre-execute decisions through the executor (real composition)', () => 
     expect(text(result)).toBe('Error: bash targets the sensitive path ~/.ssh/; approval is required because it matches the sensitive-path policy')
   })
 
+  it('denies a read of an SSH key through the executor', async () => {
+    const { ctx } = await setup()
+    const result = await call(ctx, 'read', { file_path: '~/.ssh/id_rsa' })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toBe('Error: read targets the sensitive path ~/.ssh/id_rsa; approval is required because it matches the sensitive-path policy')
+  })
+
   it('runs a write on a normal path through the executor', async () => {
     const { ctx } = await setup()
     const result = await call(ctx, 'write', { file_path: 'src/index.ts' })
@@ -290,7 +344,7 @@ describe('pre-execute decisions through the executor (real composition)', () => 
     expect(text(result)).toContain('write ran')
   })
 
-  it('runs read and grep through the executor untouched', async () => {
+  it('runs a non-key read and grep through the executor untouched', async () => {
     const { ctx } = await setup()
     const readResult = await call(ctx, 'read', { file_path: '.env' })
     expect(readResult.isError).toBe(false)
@@ -312,6 +366,13 @@ describe('pre-execute decisions through the executor (real composition)', () => 
     const result = await call(ctx, 'bash', { command: 'cat ~/.ssh/id_rsa' })
     expect(result.isError).toBe(false)
     expect(text(result)).toContain('bash ran')
+  })
+
+  it('runs a read of an SSH key through the executor when sensitivePaths is false', async () => {
+    const { ctx } = await setup({ sensitivePaths: false })
+    const result = await call(ctx, 'read', { file_path: '~/.ssh/id_rsa' })
+    expect(result.isError).toBe(false)
+    expect(text(result)).toContain('read ran')
   })
 })
 

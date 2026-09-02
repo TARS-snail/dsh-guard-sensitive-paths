@@ -1,6 +1,6 @@
 # dsh-guard-sensitive-paths
 
-一个 DeepSeek Harness（DSH）插件（bundle）：宿主侧**前置**注册 `tools/pre-execute` 策略，把指向敏感路径的 `write` / `edit` / `str_replace_editor` / `bash` 调用拦截为**审批询问（ask）**——命中时调用不会直接执行，而是请求用户批准；没有审批通道的自动化按失败关闭。
+一个 DeepSeek Harness（DSH）插件（bundle）：宿主侧**前置**注册 `tools/pre-execute` 策略，把指向敏感路径的 `write` / `edit` / `str_replace_editor` / `bash` 调用，以及 `read` 对**密钥类**文件（SSH 私钥、`.pem` 证书）的读取，拦截为**审批询问（ask）**——命中时调用不会直接执行，而是请求用户批准；没有审批通道的自动化按失败关闭。
 
 > 本插件是纯审批策略：不修改任何会话行为，只把命中敏感目标的调用变成一次审批交换。`grep` / `glob` 对同一敏感集合的**搜索排除**由搜索层（`@deepseek-ai/dsh-tool-fs-search`）始终开启地完成，与该插件的配置无关。
 
@@ -15,6 +15,7 @@
 | SSH 目录 | 路径段等于 `.ssh` | `.ssh/id_ed25519` |
 
 - `write` / `edit` 检查 `file_path`、`str_replace_editor` 检查 `path`，统一按**路径段**匹配（先归一化反斜杠）。
+- `read` 检查 `file_path`，但**只对密钥类文件**（SSH 私钥、`.pem` 证书）触发询问；读取 `.env` / `.git` / `.ssh/config` 等保持放行——把环境文件载入工具属常见合法操作，且这些路径始终被搜索层从 `glob`/`grep` 结果中排除。
 - `bash` 对**命令文本**按同一集合做子串扫描：命令里只要出现 `.env`、`.git/`、`id_rsa`、`id_ed25519`、`*.pem`、`.ssh/` 等名字就会触发询问。
 - 其余工具原样放行。
 
@@ -58,8 +59,9 @@ dsh --profile web --dump-config
 
 ## 工作原理
 
-- 守卫以 **PREPEND** 方式注册在监听链最前，先于任何权限授予等其它 `tools/pre-execute` 监听执行；命中敏感目标即返回 `ask` 决策，理由为「`<tool> targets the sensitive path <target>; approval is required because it matches the sensitive-path policy`」。
+- 守卫以 **PREPEND** 方式注册在监听链最前，先于任何权限授予等其它 `tools/pre-execute` 监听执行；命中敏感目标（含读取密钥材料）即返回 `ask` 决策，理由为「`<tool> targets the sensitive path <target>; approval is required because it matches the sensitive-path policy`」。
 - 未命中的调用经 `next()` 原样委托，不产生任何延迟或副作用。
+- 写/改类工具按完整敏感集（`.env`、`.git`、`.ssh`、SSH 私钥、`.pem`）匹配，`read` 按**密钥子集**（SSH 私钥、`.pem`）匹配，两者共享同一套 basename 规则。
 - 导出的 `SENSITIVE_PATH_GLOBS` 常量与搜索层的排除 globs 互为镜像，两处各自独立实现、互不依赖（守卫匹配用分段规则，搜索层匹配用 glob 排除 + 路径二次过滤）。
 
 ## 开发与维护

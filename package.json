@@ -1,7 +1,7 @@
 {
   "name": "dsh-guard-sensitive-paths",
-  "version": "1.0.0",
-  "description": "Approval guard for DeepSeek Harness: write/edit/editor/bash calls touching sensitive paths (.env, .git, SSH keys, .pem) become an approval ask.",
+  "version": "1.1.0",
+  "description": "Approval guard for DeepSeek Harness: write/edit/editor/bash calls touching sensitive paths (.env, .git, SSH keys, .pem) and reads of SSH keys or certificates become an approval ask.",
   "keywords": [
     "deepseek-harness",
     "dsh",
