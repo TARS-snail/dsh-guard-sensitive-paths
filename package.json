@@ -1,7 +1,18 @@
 {
   "name": "dsh-guard-sensitive-paths",
   "version": "1.0.0",
-  "description": "Sensitive-path approval guard for DeepSeek Harness: a prepended tools/pre-execute policy that turns write/edit/str_replace_editor/bash calls targeting .env, .git, SSH private keys, or certificates into an approval ask.",
+  "description": "Approval guard for DeepSeek Harness: write/edit/editor/bash calls touching sensitive paths (.env, .git, SSH keys, .pem) become an approval ask.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "security",
+    "approval",
+    "sensitive-paths",
+    "env",
+    "ssh",
+    "cordis"
+  ],
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
