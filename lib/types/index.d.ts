@@ -10,6 +10,11 @@
  * results regardless of this plugin's configuration. Enabled by default;
  * `sensitivePaths: false` makes the guard a true no-op.
  *
+ * This guard covers the tool-call surface only. A host-level component that
+ * reads or archives files outside the tool loop (the ZCode silent-snapshot
+ * class of incident) is out of scope by construction; see the README
+ * threat-model boundary.
+ *
  * @module @deepseek-ai/dsh-guard-sensitive-paths
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -32,6 +37,14 @@ export interface Config {
     sensitivePaths: boolean;
 }
 export declare const Config: z<Config>;
+/**
+ * The sensitive-path category carried in the approval reason. Categories are
+ * audit/presentation metadata only — they never change whether a call is
+ * gated, only how the ask explains itself (the ZCode incident showed the
+ * value of a self-explaining trace when a target silently leaves the
+ * machine).
+ */
+export type SensitiveCategory = 'environment-file' | 'git-metadata' | 'key-material' | 'certificate' | 'ssh-directory';
 /**
  * Whether one path names key material: a basename equal to an SSH private
  * key (`id_rsa`, `id_ed25519`, with an optional dotted suffix) or a basename
@@ -59,8 +72,8 @@ export declare function isSensitivePath(path: string): boolean;
  * Register the pre-execute approval guard, PREPENDED so it runs before any
  * other `tools/pre-execute` listener (including permission grants). A call
  * that targets a sensitive path (or reads key material) returns an approval
- * `ask` with the reason instead of delegating; `sensitivePaths: false`
- * registers nothing.
+ * `ask` carrying the target and its category instead of delegating;
+ * `sensitivePaths: false` registers nothing.
  *
  * @param ctx - plugin context; the listener is an effect scoped to it.
  * @param config - resolved plugin configuration from schemastery.

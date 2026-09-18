@@ -10,6 +10,11 @@
  * results regardless of this plugin's configuration. Enabled by default;
  * `sensitivePaths: false` makes the guard a true no-op.
  *
+ * This guard covers the tool-call surface only. A host-level component that
+ * reads or archives files outside the tool loop (the ZCode silent-snapshot
+ * class of incident) is out of scope by construction; see the README
+ * threat-model boundary.
+ *
  * @module @deepseek-ai/dsh-guard-sensitive-paths
  */
 
@@ -50,11 +55,31 @@ export const Config: z<Config> = z.object({
 })
 
 /**
+ * The sensitive-path category carried in the approval reason. Categories are
+ * audit/presentation metadata only — they never change whether a call is
+ * gated, only how the ask explains itself (the ZCode incident showed the
+ * value of a self-explaining trace when a target silently leaves the
+ * machine).
+ */
+export type SensitiveCategory =
+  | 'environment-file'
+  | 'git-metadata'
+  | 'key-material'
+  | 'certificate'
+  | 'ssh-directory'
+
+/**
  * Command scan for `bash` arguments: any of a `.env` word, a `.git`
  * directory reference, an SSH private-key name, a `.pem` file, or a
  * `~/.ssh/`-style path in the command string is a sensitive hit.
+ *
+ * `.git` is matched as a standalone path token: the lookbehind rejects a
+ * `foo.git` basename and the lookahead rejects `.gitignore`/`.github`/`.gitx`,
+ * while `.git` at end of command (`cp -r .git`) and after a separator
+ * (`--git-dir=.git`) both match. The earlier `\.git[/\\]` required a trailing
+ * separator and silently missed every `.git` reference that ended a command.
  */
-const SENSITIVE_COMMAND_SCAN = /(\.env\b|\.git[/\\]|id_rsa|id_ed25519|\b\S*\.pem\b|~?\/?\.ssh[/\\])/
+const SENSITIVE_COMMAND_SCAN = /(\.env\b|(?<![\w.-])\.git(?![\w-])|id_rsa|id_ed25519|\b\S*\.pem\b|~?\/?\.ssh[/\\])/
 
 /** Whether a basename names key material: an SSH private key (with an optional dotted suffix) or a `.pem` certificate. */
 function isKeyMaterialBasename(basename: string): boolean {
@@ -102,27 +127,63 @@ export function isSensitivePath(path: string): boolean {
 /* jscpd:ignore-end */
 
 /**
+ * Classify one sensitive target for the approval reason. Key material wins
+ * over the directory it sits in (`.ssh/id_rsa` is `key-material`, not
+ * `ssh-directory`), then the first matching directory segment decides.
+ * Total for every target {@link isSensitivePath} accepts.
+ *
+ * @param path - a path already known to be sensitive.
+ * @returns the category naming why it is sensitive.
+ */
+function classifySensitivePath(path: string): SensitiveCategory {
+  const normalized = path.replaceAll('\\', '/')
+  const segments = normalized.split('/').filter(segment => segment.length > 0)
+  const basename = segments[segments.length - 1]
+  if (basename !== undefined && isKeyMaterialBasename(basename)) {
+    return basename.endsWith('.pem') ? 'certificate' : 'key-material'
+  }
+  for (const segment of segments) {
+    if (segment === '.git') return 'git-metadata'
+    if (segment === '.ssh') return 'ssh-directory'
+    if (segment.startsWith('.env')) return 'environment-file'
+  }
+  return 'key-material'
+}
+
+/** One gated call's sensitive target plus the category explaining the ask. */
+interface SensitiveTarget {
+  /** The path (or matched command fragment) the ask names. */
+  target: string
+  /** Why the target is sensitive. */
+  category: SensitiveCategory
+}
+
+/**
  * The sensitive target one call names: the path argument for `write`/`edit`
  * (`file_path`) and `str_replace_editor` (`path`) gated on the full sensitive
  * set, the `read` `file_path` gated on key material only, or the matched
  * command fragment for `bash`. Every other tool names no target and passes
  * through.
  */
-function sensitiveTarget(exec: ToolExecution): string | undefined {
+function sensitiveTarget(exec: ToolExecution): SensitiveTarget | undefined {
   if (exec.name === 'write' || exec.name === 'edit' || exec.name === 'str_replace_editor') {
     const field = exec.name === 'str_replace_editor' ? 'path' : 'file_path'
     const args = exec.arguments
     const candidate = typeof args === 'object' && args !== null
       ? (args as Record<string, unknown>)[field]
       : undefined
-    return typeof candidate === 'string' && isSensitivePath(candidate) ? candidate : undefined
+    return typeof candidate === 'string' && isSensitivePath(candidate)
+      ? { target: candidate, category: classifySensitivePath(candidate) }
+      : undefined
   }
   if (exec.name === 'read') {
     const args = exec.arguments
     const candidate = typeof args === 'object' && args !== null
       ? (args as Record<string, unknown>).file_path
       : undefined
-    return typeof candidate === 'string' && isKeyMaterialPath(candidate) ? candidate : undefined
+    return typeof candidate === 'string' && isKeyMaterialPath(candidate)
+      ? { target: candidate, category: classifySensitivePath(candidate) }
+      : undefined
   }
   if (exec.name === 'bash') {
     const args = exec.arguments
@@ -130,7 +191,10 @@ function sensitiveTarget(exec: ToolExecution): string | undefined {
       ? (args as Record<string, unknown>).command
       : undefined
     if (typeof command !== 'string') return undefined
-    return command.match(SENSITIVE_COMMAND_SCAN)?.[0]
+    const fragment = command.match(SENSITIVE_COMMAND_SCAN)?.[0]
+    return fragment === undefined
+      ? undefined
+      : { target: fragment, category: classifySensitivePath(fragment) }
   }
   return undefined
 }
@@ -139,8 +203,8 @@ function sensitiveTarget(exec: ToolExecution): string | undefined {
  * Register the pre-execute approval guard, PREPENDED so it runs before any
  * other `tools/pre-execute` listener (including permission grants). A call
  * that targets a sensitive path (or reads key material) returns an approval
- * `ask` with the reason instead of delegating; `sensitivePaths: false`
- * registers nothing.
+ * `ask` carrying the target and its category instead of delegating;
+ * `sensitivePaths: false` registers nothing.
  *
  * @param ctx - plugin context; the listener is an effect scoped to it.
  * @param config - resolved plugin configuration from schemastery.
@@ -152,7 +216,7 @@ export function apply(ctx: Context, config: Config): void {
     if (target !== undefined) {
       return Promise.resolve({
         kind: 'ask',
-        reason: `${exec.name} targets the sensitive path ${target}; approval is required because it matches the sensitive-path policy`,
+        reason: `${exec.name} targets the sensitive path ${target.target} (${target.category}); approval is required because it matches the sensitive-path policy`,
       })
     }
     return next()

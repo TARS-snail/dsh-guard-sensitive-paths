@@ -16,7 +16,7 @@
 
 - `write` / `edit` 检查 `file_path`、`str_replace_editor` 检查 `path`，统一按**路径段**匹配（先归一化反斜杠）。
 - `read` 检查 `file_path`，但**只对密钥类文件**（SSH 私钥、`.pem` 证书）触发询问；读取 `.env` / `.git` / `.ssh/config` 等保持放行——把环境文件载入工具属常见合法操作，且这些路径始终被搜索层从 `glob`/`grep` 结果中排除。
-- `bash` 对**命令文本**按同一集合做子串扫描：命令里只要出现 `.env`、`.git/`、`id_rsa`、`id_ed25519`、`*.pem`、`.ssh/` 等名字就会触发询问。
+- `bash` 对**命令文本**扫描同一集合：命令里出现 `.env`、`.git`（作为独立路径名，覆盖 `cp -r .git`、`tar czf x .git`、`--git-dir=.git` 这类**无尾斜杠**写法）、`id_rsa`、`id_ed25519`、`*.pem`、`.ssh/` 等即触发询问。普通 git 命令（`git clone` / `push` / `pull` / `branch` / `fetch` …）因不出现 `.git` 路径名而**不受影响**；`foo.git`、`.gitignore`、`.github`、`.gitx` 也不匹配。
 - 其余工具原样放行。
 
 ## 安装
@@ -59,10 +59,20 @@ dsh --profile web --dump-config
 
 ## 工作原理
 
-- 守卫以 **PREPEND** 方式注册在监听链最前，先于任何权限授予等其它 `tools/pre-execute` 监听执行；命中敏感目标（含读取密钥材料）即返回 `ask` 决策，理由为「`<tool> targets the sensitive path <target>; approval is required because it matches the sensitive-path policy`」。
+- 守卫以 **PREPEND** 方式注册在监听链最前，先于任何权限授予等其它 `tools/pre-execute` 监听执行；命中敏感目标（含读取密钥材料）即返回 `ask` 决策，理由为「`<tool> targets the sensitive path <target> (<category>); approval is required because it matches the sensitive-path policy`」。`<category>` 取 `environment-file`、`git-metadata`、`key-material`、`certificate`、`ssh-directory`，仅用于让审批自解释、便于审计，不改变是否拦截。
 - 未命中的调用经 `next()` 原样委托，不产生任何延迟或副作用。
 - 写/改类工具按完整敏感集（`.env`、`.git`、`.ssh`、SSH 私钥、`.pem`）匹配，`read` 按**密钥子集**（SSH 私钥、`.pem`）匹配，两者共享同一套 basename 规则。
 - 导出的 `SENSITIVE_PATH_GLOBS` 常量与搜索层的排除 globs 互为镜像，两处各自独立实现、互不依赖（守卫匹配用分段规则，搜索层匹配用 glob 排除 + 路径二次过滤）。
+
+## 威胁模型边界（不覆盖什么）
+
+本插件是**工具调用面**的路径审批策略，只观察 `write` / `edit` / `str_replace_editor` / `read` / `bash` 这些工具的**参数**。以下都不在其射程内：
+
+- **宿主级 sidecar / 运行时自身的文件与网络行为**：不经过工具循环的读取、打包、加密、上传，本插件完全看不到，也不会产生任何 ask。2026-09-18 的智谱 ZCode「静默上传整仓 `.git` 历史」事件即属此类——其 313MB 归档中 `.git` 占 86.6%（`.git/lfs` 56.8%、`.git/objects` 29.6%、`.git/logs` 0.2%），打包上传由宿主进程在工具循环之外完成，**任何工具面策略都无法拦截**。
+- **网络出口**：文件 sandbox 管文件访问，不管主机进程把数据发往哪里；整仓外传需要出口控制，不是路径正则能解决的。
+- **模型推理端点**：按设计，任务相关的上下文仍会发送给 LLM provider，与本插件无关。
+
+因此本插件能保证的是「工具调用面上命中的敏感目标一定会先变成一次**失败关闭**的审批」，**不能**保证「装了它就不会被偷传」。要覆盖上述面，需要文件 sandbox、进程隔离与网络出口策略。ZCode 事件同时印证了 `.git` 是最高价值目标，本插件据此把 `.git` 的 bash 检测从「必须带尾斜杠」修正为「独立路径名」，覆盖 `cp -r .git`、`tar … .git` 这类历史外传形态；`.git/config` 的读取仍按现状放行（其凭据/内网主机名维度的收紧属后续项）。
 
 ## 开发与维护
 
